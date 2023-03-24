@@ -229,7 +229,7 @@ impl TypeChecker {
                 let cond = self.check_expr(cond)?;
                 let body = self.check_expr(body)?;
                 match (cond, body) {
-                    (InferedVal::Bool, InferedVal::Unit) => Ok(InferedVal::Unit),
+                    (InferedVal::Bool, _) => Ok(InferedVal::Unit),
                     (cond, body) => Err(TCError {
                         message: format!(
                             "Can't use {:?} as a condition and {:?} as body",
