@@ -1,8 +1,9 @@
-use peg::parser;
 use crate::Span;
+use peg::parser;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Expression {
+    Index(Box<Expression>, Box<Expression>, Span),
     While(Box<Expression>, Box<Expression>, Span),
     Bool(bool, Span),
     Integer(i64, Span),
@@ -31,18 +32,29 @@ pub enum Expression {
     AddAssign(Box<Expression>, Box<Expression>, Span),
     SubAssign(Box<Expression>, Box<Expression>, Span),
     Array(Vec<Expression>, Span),
+    FunctionCall(Box<Expression>, Vec<Expression>, Span),
+    ClassDeclaration(Box<Expression>, Vec<Expression>, Span),
+    FunctionDeclaration(Box<Expression>, Vec<Expression>, Vec<Expression>, Span),
+    Member(Box<Expression>, Box<Expression>, Span),
     If(
         Box<Expression>,
         Box<Expression>,
         Option<Box<Expression>>,
         Span,
     ),
+    Return(Box<Expression>, Span),
 }
 
 impl Expression {
     pub fn span(&self) -> &Span {
         use Expression::*;
         match self {
+            Return(_, span) => span,
+            Member(_, _, span) => span,
+            FunctionDeclaration(_, _, _, span) => span,
+            ClassDeclaration(_, _, span) => span,
+            FunctionCall(_, _, span) => span,
+            Index(_, _, span) => span,
             Array(_, span) => span,
             AddAssign(_, _, span) => span,
             SubAssign(_, _, span) => span,
@@ -83,15 +95,18 @@ pub grammar lang() for str {
         = _ v:statements() _ {
             v
         }
-    rule array() -> Expression
-        = _ "[" _ v:(atom() ** ",") _ "]" p:position!() {
-            let span = Span::new(v[0].span().start(), p);
-            Expression::Array(v, span)
-        }
     rule statements() -> Expression
         = _ v:(statement())+ _ {
             let span = Span::new(v[0].span().start(), v[v.len()-1].span().end());
             Expression::Block(v, span)
+        }
+    rule comma_separated() -> Vec<Expression>
+        = atom()  ** ","
+
+    rule array() -> Expression
+        = _ p1:position!() "[" _ v:comma_separated() _ "]" p2:position!() {
+            let span = Span::new(p1, p2);
+            Expression::Array(v, span)
         }
 
     rule increment() -> Expression
@@ -116,9 +131,22 @@ pub grammar lang() for str {
             Expression::Decr(Box::new(v), span)
         }
 
+    rule member() -> Expression
+        = _ v0:identifier() "." v1:identifier() {
+            let span = Span::new(v0.span().start(), v1.span().end());
+            Expression::Member(Box::new(v0), Box::new(v1), span)
+        }
+
+    rule return_statement() -> Expression
+        = _ p:position!() "return" _ v:expression() {
+            let span = Span::new(p, v.span().end());
+            Expression::Return(Box::new(v), span)
+        }
+
     rule postfix() -> Expression
         = v:increment()
         / v:decrement()
+        / v:member()
         / v:identifier()
 
     pub rule statement() -> Expression
@@ -128,7 +156,21 @@ pub grammar lang() for str {
         / if_else()
         / x:if_statement()
         / x:while_statement()
+        / x:function_call() _ ";" {
+            x
+        }
+        / x:class_decl() {
+            x
+        } / x:function_decl() {
+            x
+        }/ x:return_statement() _ ";" {
+            x
+        }
 
+    pub rule expression() -> Expression
+        = cmp()
+        / sum()
+        / postfix()
 
 
     rule else_statement() -> Expression
@@ -183,10 +225,6 @@ pub grammar lang() for str {
         }
 
 
-    pub rule expression() -> Expression
-        = cmp()
-        / sum()
-        / postfix()
 
     pub rule cmp() -> Expression
         = _ lhs:atom() _ "&&" _ rhs:atom() {
@@ -200,10 +238,17 @@ pub grammar lang() for str {
         comparison()
 
 
+    rule index_assign() -> Expression
+        = _ l:index() _ "=" _ r:statement() {
+            let span = Span::new(l.span().start(), r.span().end());
+            Expression::Assign(Box::new(l), Box::new(r), span)
+        }
+
     rule assign() -> Expression
         = add_assign()
         / sub_assign()
-        / _ l:identifier() _ "=" _ r:expression() _ ";" {
+        / index_assign()
+        / _ l:identifier() _ "=" _ r:statement() {
             let span = Span::new(l.span().start(), r.span().end());
             Expression::Assign(Box::new(l), Box::new(r), span)
         }
@@ -258,25 +303,51 @@ pub grammar lang() for str {
         / atom()
 
     rule bool() -> Expression
-        = "true" end:position!() {
+        = _ "true" _ end:position!() {
             let start = end - 4;
             Expression::Bool(true, Span::new(start, end))
         }
-        / "false" end:position!() {
+        / _ "false" _  end:position!() {
             let start = end - 5;
             Expression::Bool(false, Span::new(start, end))
         }
 
+    pub rule index() -> Expression
+        = _ i:identifier() _ "[" _ b:atom() _ "]" _  {
+            let span = Span::new(i.span().start(), i.span().end());
+            Expression::Index(Box::new(i), Box::new(b), span)
+        }
+
+    pub rule function_call() -> Expression
+        = _ p1:position!() i:identifier() _ "(" _ args:expression() ** ("," _ ) _ ")" _ p2:position!() {
+            let span = Span::new(p1, p2);
+            Expression::FunctionCall(Box::new(i), args, span)
+        } /
+        _ p1:position!() i:identifier() _ "(" _ ")" _ p2:position!() {
+            let span = Span::new(p1, p2);
+            Expression::FunctionCall(Box::new(i), vec![], span)
+        } /
+        _ p1:position!() i:member() _ "(" _ ")" _ p2:position!() {
+            let span = Span::new(p1, p2);
+            Expression::FunctionCall(Box::new(i), vec![], span)
+        }
+        / _ p1:position!() i:member () _ "(" _ args:expression() ** ("," _ ) _ ")" _ p2:position!() {
+            let span = Span::new(p1, p2);
+            Expression::FunctionCall(Box::new(i), args, span)
+        }
+
     pub rule atom() -> Expression
         = float()
+         / index()
+         / array()
+         / string()
          / integer()
          / unit()
          / string()
-         / postfix()
          / bool()
          / increment()
          / decrement()
-         / array()
+         / postfix()
          / "(" _ v:expression() _ ")" { v }
 
 
@@ -292,15 +363,34 @@ pub grammar lang() for str {
         }
 
     rule float() -> Expression
-        = n:$(['0'..='9']+) "." m:$(['0'..='9']+) end:position!() {
+        = _ n:$(['0'..='9']+) "." m:$(['0'..='9']+) end:position!() {
             let start = end - n.len() - m.len() - 1;
             Expression::Float(format!("{}.{}", n, m).parse().unwrap(), Span::new(start, end))
         }
 
     rule integer() -> Expression
-        = n:$(['0'..='9']+) end: position!() {
+        =_  n:$(['0'..='9']+) end: position!() {
             let start = end - n.len();
             Expression::Integer(n.parse().unwrap(), Span::new(start, end))
+        }
+
+    rule class_body() -> Vec<Expression>
+        = _ v:statements() ** _ { v }
+        / _ { vec![] }
+    rule class_decl() -> Expression
+        = p1:position!() _ "class " _ i:identifier() _ "=>" _ c:class_body() _ "---" p2:position!()_ {
+
+            Expression::ClassDeclaration(Box::new(i), c, Span::new(p1, p2))
+        }
+
+    rule function_body() -> Vec<Expression>
+        = _ v:statements() ** _ { v }
+        / _ { vec![] }
+
+    rule function_decl() -> Expression
+        = p1:position!() _ "fun " _ i:identifier() _  args:identifier() ** ("," _) _ "=>" _ c:function_body() _ "---" p2:position!() {
+
+            Expression::FunctionDeclaration(Box::new(i), args, c, Span::new(p1, p2))
         }
 }}
 
@@ -808,11 +898,10 @@ mod test {
             ))
         );
     }
-    #[ignore]
     #[test]
     fn test40() {
         assert_eq!(
-            lang::statement("[1, 2, 3]"),
+            lang::statement("[1, 2, 3];"),
             Ok(Array(
                 vec![
                     Integer(1, Span::new(1, 2)),
@@ -820,6 +909,267 @@ mod test {
                     Integer(3, Span::new(7, 8))
                 ],
                 Span::new(0, 9)
+            ))
+        );
+    }
+    #[test]
+    fn test41() {
+        assert_eq!(
+            lang::statement("a[1];"),
+            Ok(Index(
+                Box::new(Identifier("a".to_string(), Span::new(0, 1))),
+                Box::new(Integer(1, Span::new(2, 3))),
+                Span::new(0, 1)
+            ))
+        );
+    }
+    #[test]
+    fn test42() {
+        assert_eq!(
+            lang::statement("a[1] = 2;"),
+            Ok(Assign(
+                Box::new(Index(
+                    Box::new(Identifier("a".to_string(), Span::new(0, 1))),
+                    Box::new(Integer(1, Span::new(2, 3))),
+                    Span::new(0, 1)
+                )),
+                Box::new(Integer(2, Span::new(7, 8))),
+                Span::new(0, 8)
+            ))
+        );
+    }
+    #[test]
+    fn test43() {
+        assert_eq!(
+            lang::statement("a();"),
+            Ok(FunctionCall(
+                Box::new(Identifier("a".to_string(), Span::new(0, 1))),
+                vec![],
+                Span::new(0, 3)
+            ))
+        );
+    }
+    #[test]
+    fn test44() {
+        assert_eq!(
+            lang::statement("a(1, 2, 3);"),
+            Ok(FunctionCall(
+                Box::new(Identifier("a".to_string(), Span::new(0, 1))),
+                vec![
+                    Integer(1, Span::new(2, 3)),
+                    Integer(2, Span::new(5, 6)),
+                    Integer(3, Span::new(8, 9))
+                ],
+                Span::new(0, 10)
+            ))
+        );
+    }
+    #[test]
+    fn test45() {
+        assert_eq!(
+            lang::parser("c = a();"),
+            Ok(Block(
+                vec![Assign(
+                    Box::new(Identifier("c".to_string(), Span::new(0, 1))),
+                    Box::new(FunctionCall(
+                        Box::new(Identifier("a".to_string(), Span::new(4, 5))),
+                        vec![],
+                        Span::new(4, 7)
+                    )),
+                    Span::new(0, 7)
+                )],
+                Span::new(0, 7)
+            ))
+        );
+    }
+    #[test]
+    fn test46() {
+        assert_eq!(
+            lang::parser("c = a(1, 2, 3);"),
+            Ok(Block(
+                vec![Assign(
+                    Box::new(Identifier("c".to_string(), Span::new(0, 1))),
+                    Box::new(FunctionCall(
+                        Box::new(Identifier("a".to_string(), Span::new(4, 5))),
+                        vec![
+                            Integer(1, Span::new(6, 7)),
+                            Integer(2, Span::new(9, 10)),
+                            Integer(3, Span::new(12, 13))
+                        ],
+                        Span::new(4, 14)
+                    )),
+                    Span::new(0, 14)
+                )],
+                Span::new(0, 14)
+            ))
+        );
+    }
+    #[test]
+    fn test47() {
+        assert_eq!(
+            lang::parser("[1.0, 2.0, 3.0];"),
+            Ok(Block(
+                vec![Array(
+                    vec![
+                        Float(1.0, Span::new(1, 4)),
+                        Float(2.0, Span::new(6, 9)),
+                        Float(3.0, Span::new(11, 14))
+                    ],
+                    Span::new(0, 15)
+                )],
+                Span::new(0, 15)
+            ))
+        );
+    }
+    #[test]
+    fn test48() {
+        assert_eq!(
+            lang::parser("class A =>\n ---"),
+            Ok(Block(
+                vec![ClassDeclaration(
+                    Box::new(Identifier("A".to_string(), Span::new(6, 7))),
+                    vec![],
+                    Span::new(0, 15)
+                )],
+                Span::new(0, 15)
+            ))
+        );
+    }
+    #[test]
+    fn test49() {
+        assert_eq!(
+            lang::parser("fun a b, c => ---"),
+            Ok(Block(
+                vec![FunctionDeclaration(
+                    Box::new(Identifier("a".to_string(), Span::new(4, 5))),
+                    vec![
+                        Identifier("b".to_string(), Span::new(6, 7)),
+                        Identifier("c".to_string(), Span::new(9, 10))
+                    ],
+                    vec![],
+                    Span::new(0, 17)
+                )],
+                Span::new(0, 17)
+            ))
+        );
+    }
+    #[test]
+    fn test50() {
+        assert_eq!(
+            lang::parser("fun a b, c => a = 1; ---"),
+            Ok(Block(
+                vec![FunctionDeclaration(
+                    Box::new(Identifier("a".to_string(), Span::new(4, 5))),
+                    vec![
+                        Identifier("b".to_string(), Span::new(6, 7)),
+                        Identifier("c".to_string(), Span::new(9, 10))
+                    ],
+                    vec![Block(
+                        vec![Assign(
+                            Box::new(Identifier("a".to_string(), Span::new(14, 15))),
+                            Box::new(Integer(1, Span::new(18, 19))),
+                            Span::new(14, 19)
+                        )],
+                        Span::new(14, 19)
+                    )],
+                    Span::new(0, 24)
+                )],
+                Span::new(0, 24)
+            ))
+        );
+    }
+    #[test]
+    fn test51() {
+        assert_eq!(
+            lang::parser("class A => fun a b, c => a = 1; --- ---"),
+            Ok(Block(
+                vec![ClassDeclaration(
+                    Box::new(Identifier("A".to_string(), Span::new(6, 7))),
+                    vec![Block(
+                        vec![FunctionDeclaration(
+                            Box::new(Identifier("a".to_string(), Span::new(15, 16))),
+                            vec![
+                                Identifier("b".to_string(), Span::new(17, 18)),
+                                Identifier("c".to_string(), Span::new(20, 21))
+                            ],
+                            vec![Block(
+                                vec![Assign(
+                                    Box::new(Identifier("a".to_string(), Span::new(25, 26))),
+                                    Box::new(Integer(1, Span::new(29, 30))),
+                                    Span::new(25, 30)
+                                )],
+                                Span::new(25, 30)
+                            )],
+                            Span::new(11, 35)
+                        )],
+                        Span::new(11, 35)
+                    )],
+                    Span::new(0, 39)
+                )],
+                Span::new(0, 39)
+            ))
+        );
+    }
+    #[test]
+    fn test52() {
+        assert_eq!(
+            lang::parser("a.b;"),
+            Ok(Block(
+                vec![Member(
+                    Box::new(Identifier("a".to_string(), Span::new(0, 1))),
+                    Box::new(Identifier("b".to_string(), Span::new(2, 3))),
+                    Span::new(0, 3)
+                )],
+                Span::new(0, 3)
+            ))
+        );
+    }
+    #[test]
+    fn test53() {
+        assert_eq!(
+            lang::parser("a.b();"),
+            Ok(Block(
+                vec![FunctionCall(
+                    Box::new(Member(
+                        Box::new(Identifier("a".to_string(), Span::new(0, 1))),
+                        Box::new(Identifier("b".to_string(), Span::new(2, 3))),
+                        Span::new(0, 3)
+                    )),
+                    vec![],
+                    Span::new(0, 5)
+                )],
+                Span::new(0, 5)
+            ))
+        );
+    }
+    #[test]
+    fn test54() {
+        assert_eq!(
+            lang::parser("a.b(1);"),
+            Ok(Block(
+                vec![FunctionCall(
+                    Box::new(Member(
+                        Box::new(Identifier("a".to_string(), Span::new(0, 1))),
+                        Box::new(Identifier("b".to_string(), Span::new(2, 3))),
+                        Span::new(0, 3)
+                    )),
+                    vec![Integer(1, Span::new(4, 5))],
+                    Span::new(0, 6)
+                )],
+                Span::new(0, 6)
+            ))
+        );
+    }
+    #[test]
+    fn test55() {
+        assert_eq!(
+            lang::parser("return a;"),
+            Ok(Block(
+                vec![Return(
+                    Box::new(Identifier("a".to_string(), Span::new(7, 8))),
+                    Span::new(0, 8)
+                )],
+                Span::new(0, 8)
             ))
         );
     }

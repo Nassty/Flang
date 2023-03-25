@@ -1,23 +1,13 @@
-a = 1;
-b = 2;
-d = 3;
-c = d;
-e = 0.2;
+class A =>
+    fun init a, b, c =>
+        print("hello world");
+    ---
 
-if e < 2:
-    f = 3;
----
-else:
-    f = 4;
+    fun test a =>
+        print("1");
+        return a;
+    ---
 ---
 
-f += a + b
-
-if c < 3:
-    g = 5;
----
-
-p = 0;
-while p < 3:
-    p++;
----
+b = A();
+b.test(1);

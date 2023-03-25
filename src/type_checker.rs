@@ -8,9 +8,17 @@ pub struct TCError {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function {
+    args: Vec<InferedVal>,
+    arg_names: Vec<String>,
+    return_type: Box<InferedVal>,
+}
+
 #[derive(Debug)]
 pub struct TypeChecker {
     values: HashMap<String, InferedVal>,
+    classes: HashMap<String, HashMap<String, InferedVal>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,14 +28,26 @@ enum InferedVal {
     Bool,
     String,
     Array(Vec<InferedVal>),
+    Instance,
+    Function(Function),
     Unit,
 }
 
 impl TypeChecker {
     pub fn new() -> Self {
-        Self {
+        let mut s = Self {
             values: HashMap::new(),
-        }
+            classes: HashMap::new(),
+        };
+        s.values.insert(
+            "print".to_string(),
+            InferedVal::Function(Function {
+                args: vec![InferedVal::String],
+                arg_names: vec!["s".to_string()],
+                return_type: Box::new(InferedVal::Unit),
+            }),
+        );
+        s
     }
 
     pub fn check(&mut self, expr: &Expression) -> Result<(), TCError> {
@@ -38,6 +58,164 @@ impl TypeChecker {
     }
     fn check_expr(&mut self, expr: &Expression) -> Result<InferedVal, TCError> {
         match expr {
+            Expression::Return(expr, _) => self.check_expr(expr),
+            Expression::Member(head, tail, _) => {
+                let _head = self.check_expr(head)?;
+                let tail = self.check_expr(tail)?;
+                Ok(tail)
+            }
+            Expression::FunctionDeclaration(identifier, args, body, _) => {
+                let name = match identifier.as_ref() {
+                    Expression::Identifier(name, _) => name,
+                    _ => todo!(),
+                };
+                let mut args_types = Vec::new();
+                let mut arg_names = Vec::new();
+                for arg in args {
+                    if let Expression::Identifier(name, _) = arg {
+                        arg_names.push(name.to_string());
+                    }
+                    let arg_type = InferedVal::Unit;
+                    args_types.push(arg_type);
+                }
+                let mut return_type = InferedVal::Unit;
+                for expr in body {
+                    return_type = self.check_expr(expr)?;
+                }
+                self.values.insert(
+                    name.clone(),
+                    InferedVal::Function(Function {
+                        args: args_types,
+                        arg_names,
+                        return_type: Box::new(return_type),
+                    }),
+                );
+                Ok(InferedVal::Unit)
+            }
+            Expression::ClassDeclaration(head, body, _) => {
+                if let Expression::Identifier(name, _) = head.as_ref() {
+                    let constructor = Function {
+                        args: Vec::new(),
+                        arg_names: Vec::new(),
+                        return_type: Box::new(InferedVal::Instance),
+                    };
+                    self.values
+                        .insert(name.clone(), InferedVal::Function(constructor));
+                    let mut class = HashMap::new();
+                    for expr in body {
+                        match expr {
+                            Expression::Block(expressions, _) => {
+                                for expression in expressions {
+                                    match expression {
+                                        Expression::FunctionDeclaration(
+                                            identifier,
+                                            args,
+                                            body,
+                                            _,
+                                        ) => {
+                                            let name = match identifier.as_ref() {
+                                                Expression::Identifier(name, _) => name,
+                                                _ => todo!(),
+                                            };
+                                            let mut args_types = Vec::new();
+                                            let mut arg_names = Vec::new();
+                                            for arg in args {
+                                                if let Expression::Identifier(name, _) = arg {
+                                                    arg_names.push(name.to_string());
+                                                }
+                                                let arg_type = InferedVal::Unit;
+                                                args_types.push(arg_type);
+                                            }
+                                            let mut return_type = InferedVal::Unit;
+                                            let old_values = self.values.clone();
+                                            arg_names
+                                                .iter()
+                                                .zip(args_types.iter().cloned())
+                                                .for_each(|(k, v)| {
+                                                    self.values.insert(k.to_string(), v);
+                                                });
+
+                                            for expr in body {
+                                                return_type = self.check_expr(expr)?;
+                                            }
+                                            class.insert(
+                                                name.clone(),
+                                                InferedVal::Function(Function {
+                                                    args: args_types,
+                                                    arg_names,
+                                                    return_type: Box::new(return_type),
+                                                }),
+                                            );
+                                            self.values = old_values;
+                                        }
+                                        _ => todo!(),
+                                    }
+                                }
+                            }
+                            k => todo!("{:?}", k),
+                        }
+                    }
+
+                    self.classes.insert(name.clone(), class);
+                }
+
+                Ok(InferedVal::Unit)
+            }
+            Expression::Index(lhs, rhs, _) => {
+                let lhs = self.check_expr(lhs)?;
+                let rhs = self.check_expr(rhs)?;
+                match (lhs, rhs) {
+                    (InferedVal::Array(l), InferedVal::Integer) => Ok(l[0].clone()),
+                    (lhs, rhs) => Err(TCError {
+                        message: format!("Can't index {:?} with {:?}", lhs, rhs),
+                        span: expr.span().clone(),
+                    }),
+                }
+            }
+            Expression::FunctionCall(name, args, _) => {
+                let name: String = match name.as_ref() {
+                    Expression::Identifier(name, _) => name.to_string(),
+                    Expression::Member(_, _, _) => {
+                        return Ok(InferedVal::Unit);
+                    }
+                    k => todo!("{:?}", k),
+                };
+                let funs = self.values.clone();
+                let f = funs.get(&name);
+                let function = match f {
+                    Some(InferedVal::Function(f)) => f,
+                    _ => {
+                        return Err(TCError {
+                            message: format!("Unknown function: {:?}", name),
+                            span: expr.span().clone(),
+                        })
+                    }
+                };
+                if function.args.len() != args.len() {
+                    return Err(TCError {
+                        message: format!(
+                            "Function {:?} takes {:?} arguments, but {:?} were given",
+                            name,
+                            function.args.len(),
+                            args.len()
+                        ),
+                        span: expr.span().clone(),
+                    });
+                }
+                for (i, arg) in args.iter().enumerate() {
+                    let arg_type = self.check_expr(arg)?;
+                    if arg_type != function.args[i] {
+                        return Err(TCError {
+                            message: format!(
+                                "Argument {:?} of function {:?} is of type {:?}, but should be of type {:?}",
+                                i, name, arg_type, function.args[i]
+                            ),
+                            span: expr.span().clone(),
+                        });
+                    }
+                }
+                Ok(*function.return_type.clone())
+            }
             Expression::Integer(_, _) => Ok(InferedVal::Integer),
             Expression::Float(_, _) => Ok(InferedVal::Float),
             Expression::Bool(_, _) => Ok(InferedVal::Bool),
@@ -45,10 +223,13 @@ impl TypeChecker {
             Expression::Unit(_) => Ok(InferedVal::Unit),
             Expression::Identifier(name, _) => match self.values.get(name) {
                 Some(val) => Ok(val.clone()),
-                None => Err(TCError {
-                    message: format!("Unknown identifier: {}", name),
-                    span: expr.span().clone(),
-                }),
+                None => {
+                    panic!();
+                    Err(TCError {
+                        message: format!("Unknown identifier: {}", name),
+                        span: expr.span().clone(),
+                    })
+                }
             },
             Expression::Sum(lhs, rhs, _) => {
                 let lhs = self.check_expr(lhs)?;
@@ -59,9 +240,12 @@ impl TypeChecker {
                     (InferedVal::Integer, InferedVal::Float) => Ok(InferedVal::Float),
                     (InferedVal::Float, InferedVal::Integer) => Ok(InferedVal::Float),
                     (InferedVal::String, InferedVal::String) => Ok(InferedVal::String),
-                    (InferedVal::Array(l), InferedVal::Array(_)) => {
-                        Ok(InferedVal::Array(vec![l[0].clone()]))
-                    }
+                    (InferedVal::Array(l), InferedVal::Array(r)) => Ok(InferedVal::Array(
+                        l.iter()
+                            .zip(r.iter())
+                            .map(|(l, r)| if l == r { l.clone() } else { InferedVal::Unit })
+                            .collect(),
+                    )),
                     (lhs, rhs) => Err(TCError {
                         message: format!("Can't add {:?} and {:?}", lhs, rhs),
                         span: expr.span().clone(),
@@ -363,5 +547,96 @@ mod test {
         let expr = crate::parser("a = 1;\na;").unwrap();
         let res = tc.check_expr(&expr).unwrap();
         assert_eq!(res, InferedVal::Integer);
+    }
+    #[test]
+    fn test08() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("a=1;\nb=2;\na == b;").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        assert_eq!(res, InferedVal::Bool);
+    }
+    #[test]
+    fn test09() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("a=1;\nb=2;\na != b;").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        assert_eq!(res, InferedVal::Bool);
+    }
+    #[test]
+    fn test10() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("a=1;\nb=2;\na <= b;").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        assert_eq!(res, InferedVal::Bool);
+    }
+    #[test]
+    fn test11() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("a=1;\nb=2;\na >= b;").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        assert_eq!(res, InferedVal::Bool);
+    }
+    #[test]
+    fn test12() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("1+2;").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        assert_eq!(res, InferedVal::Integer);
+    }
+    #[test]
+    fn test13() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("1.0+2.0;").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        assert_eq!(res, InferedVal::Float);
+    }
+    #[test]
+    fn test14() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("1+1.0;").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        assert_eq!(res, InferedVal::Float);
+    }
+    #[test]
+    fn test15() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("1.0+1;").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        assert_eq!(res, InferedVal::Float);
+    }
+    #[test]
+    fn test16() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("\"a\"+\"b\";").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        assert_eq!(res, InferedVal::String);
+    }
+    #[test]
+    fn test17() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("[1, 2] + [3, 4];").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        match res {
+            InferedVal::Array(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0], InferedVal::Integer);
+                assert_eq!(v[1], InferedVal::Integer);
+            }
+            k => panic!("unexpected: {:?}", k),
+        }
+    }
+    #[test]
+    fn test18() {
+        let mut tc = TypeChecker::new();
+        let expr = crate::parser("[1, 2] + [3.0, 4.0];").unwrap();
+        let res = tc.check_expr(&expr).unwrap();
+        match res {
+            InferedVal::Array(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0], InferedVal::Unit);
+                assert_eq!(v[1], InferedVal::Unit);
+            }
+            k => panic!("unexpected: {:?}", k),
+        }
     }
 }
